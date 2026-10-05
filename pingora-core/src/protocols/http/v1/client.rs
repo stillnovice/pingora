@@ -933,7 +933,11 @@ pub fn http_req_header_to_wire(req: &RequestHeader) -> Option<BytesMut> {
         Version::HTTP_09 => "HTTP/0.9",
         Version::HTTP_10 => "HTTP/1.0",
         Version::HTTP_11 => "HTTP/1.1",
-        Version::HTTP_2 => "HTTP/2",
+        // H2 requests are serialized as HTTP/1.1: `HTTP/2` is not a valid
+        // HTTP/1 request-line version (httparse rejects it), and this wire
+        // form is only consumed by HTTP/1 parsers (e.g. subrequests created
+        // from an H2 downstream session).
+        Version::HTTP_2 => "HTTP/1.1",
         _ => {
             return None; /*TODO: unsupported version */
         }
@@ -2849,6 +2853,25 @@ mod test_sync {
         assert_eq!("/", req.path.unwrap());
         assert_eq!(b"Foo", headers[0].name.as_bytes());
         assert_eq!(b"Bar", headers[0].value);
+    }
+
+    #[test]
+    fn test_h2_request_to_wire_uses_h1_version() {
+        // Background subrequests are built by serializing the downstream
+        // request as HTTP/1 text and re-parsing it with httparse. An H2
+        // request serialized with an `HTTP/2` request-line version fails to
+        // parse (httparse::Error::Version), which kills the subrequest and
+        // can dangle the cache write lock (cloudflare/pingora#1033).
+        let mut new_request = RequestHeader::build("GET", b"/", None).unwrap();
+        new_request.set_version(Version::HTTP_2);
+        new_request.insert_header("Foo", "Bar").unwrap();
+        let wire = http_req_header_to_wire(&new_request).unwrap();
+        assert!(wire.starts_with(b"GET / HTTP/1.1\r\n"));
+        let mut headers = [httparse::EMPTY_HEADER; 128];
+        let mut req = httparse::Request::new(&mut headers);
+        let result = req.parse(wire.as_ref());
+        assert!(result.unwrap().is_complete());
+        assert_eq!("/", req.path.unwrap());
     }
 
     #[test]

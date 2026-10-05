@@ -1286,6 +1286,72 @@ mod test {
     }
 
     #[tokio::test]
+    async fn test_pseudo_raw_h1_request_header_is_valid_h1() {
+        let (client, server) = duplex(65536);
+
+        let client = tokio::spawn(async move {
+            let (h2, connection) = h2::client::handshake(client).await.unwrap();
+            tokio::spawn(async move {
+                let _ = connection.await;
+            });
+
+            let mut h2 = h2.ready().await.unwrap();
+            let request = Request::builder()
+                .method(Method::GET)
+                .uri("https://authority.example/test?x=1")
+                .header(header::HOST, "authority.example")
+                .body(())
+                .unwrap();
+            let (response, _) = h2.send_request(request, true).unwrap();
+            assert_eq!(response.await.unwrap().status(), StatusCode::NO_CONTENT);
+        });
+
+        let mut connection = handshake(Box::new(server), None).await.unwrap();
+        let digest = Arc::new(Digest::default());
+        let Some(H2Accept::Session(mut session)) =
+            HttpSession::from_h2_conn(&mut connection, digest.clone())
+                .await
+                .unwrap()
+        else {
+            panic!("request did not reach the application");
+        };
+
+        // The raw header used to build background subrequests must be a valid
+        // HTTP/1 request: httparse rejects an `HTTP/2` request-line version,
+        // which previously killed stale-while-revalidate subrequests spawned
+        // from H2 downstream sessions and dangled the cache write lock
+        // (cloudflare/pingora#1033).
+        let raw = session.pseudo_raw_h1_request_header();
+        let mut headers = [httparse::EMPTY_HEADER; 32];
+        let mut req = httparse::Request::new(&mut headers);
+        let parsed = req.parse(raw.as_ref()).unwrap();
+        assert!(parsed.is_complete());
+        assert_eq!(req.method, Some("GET"));
+        assert_eq!(req.version, Some(1));
+
+        session
+            .write_response_header(
+                Box::new(ResponseHeader::build(StatusCode::NO_CONTENT, Some(0)).unwrap()),
+                true,
+            )
+            .unwrap();
+        drop(session);
+
+        // The connection is only driven while accepting; run accept once
+        // more to flush the response and observe the client hang up.
+        let done = timeout(
+            Duration::from_secs(1),
+            HttpSession::from_h2_conn(&mut connection, digest),
+        )
+        .await
+        .expect("connection did not finish")
+        .expect("connection failed");
+        assert!(done.is_none());
+
+        client.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn test_server_rejects_authority_userinfo_with_400() {
         let (client, server) = duplex(65536);
 
