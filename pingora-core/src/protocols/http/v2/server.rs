@@ -966,6 +966,7 @@ mod test {
     use tokio::io::{duplex, AsyncWriteExt, DuplexStream};
     use tokio::sync::oneshot;
     use tokio_stream::StreamExt;
+    use tokio_test::io::Builder;
 
     async fn advertised_settings(options: Option<H2Options>) -> Settings {
         let (mut client, server) = duplex(65536);
@@ -1328,6 +1329,20 @@ mod test {
         assert!(parsed.is_complete());
         assert_eq!(req.method, Some("GET"));
         assert_eq!(req.version, Some(1));
+
+        // The same bytes must survive pingora's HTTP/1 server parser, which
+        // is what actually reads the dummy subrequest session.
+        let mock_io = Builder::new().read(raw.as_ref()).build();
+        let mut h1 = crate::protocols::http::v1::server::HttpSession::new(Box::new(mock_io));
+        let n = h1
+            .read_request()
+            .await
+            .expect("subrequest parse should succeed")
+            .expect("request header should be present");
+        assert_eq!(n, raw.len());
+        assert_eq!(h1.req_header().method, Method::GET);
+        assert_eq!(h1.req_header().version, http::Version::HTTP_11);
+        assert_eq!(h1.req_header().headers[header::HOST], "authority.example");
 
         session
             .write_response_header(

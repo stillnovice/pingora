@@ -2875,6 +2875,29 @@ mod test_sync {
     }
 
     #[test]
+    fn test_h2_request_to_wire_preserves_headers() {
+        // The subrequest built from an H2 downstream session must carry the
+        // original method, target, and headers; only the version changes.
+        let mut new_request = RequestHeader::build("POST", b"/submit?ok=1", None).unwrap();
+        new_request.set_version(Version::HTTP_2);
+        new_request.insert_header("Host", "example.com").unwrap();
+        new_request
+            .insert_header("Content-Type", "application/json")
+            .unwrap();
+        let wire = http_req_header_to_wire(&new_request).unwrap();
+        let mut headers = [httparse::EMPTY_HEADER; 128];
+        let mut req = httparse::Request::new(&mut headers);
+        assert!(req.parse(wire.as_ref()).unwrap().is_complete());
+        assert_eq!(req.method, Some("POST"));
+        assert_eq!(req.path, Some("/submit?ok=1"));
+        assert_eq!(req.version, Some(1));
+        assert_eq!(headers[0].name, "Host");
+        assert_eq!(headers[0].value, b"example.com");
+        assert_eq!(headers[1].name, "Content-Type");
+        assert_eq!(headers[1].value, b"application/json");
+    }
+
+    #[test]
     fn test_absolute_form_and_connect_to_wire() {
         // The request-line written to the upstream is built from raw_path(), so both
         // the absolute-form target (RFC 9112 §3.2.2) and the CONNECT authority-form
